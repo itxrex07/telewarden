@@ -132,6 +132,15 @@ interface FileDao {
     @Query("SELECT COUNT(*) FROM files WHERE trashedAt IS NULL AND chatId IS :chatId")
     suspend fun fileCount(chatId: Long?): Int
 
+    @Query(
+        """SELECT EXISTS(
+            SELECT 1 FROM files
+            WHERE chatId IS :chatId AND trashedAt IS NULL
+              AND isEncrypted = 0 AND name LIKE 'tw\_%.tde' ESCAPE '\'
+        )"""
+    )
+    suspend fun hasUndecodedLoggerFiles(chatId: Long?): Boolean
+
     @Query("DELETE FROM files WHERE chatId = :chatId AND localPath IS NULL")
     suspend fun deleteRemoteOnlyInChat(chatId: Long): Int
 

@@ -112,7 +112,7 @@ class PreviewContentResolver(
                 return@flow
             }
 
-            if (wrappedKeyRepository.exists(file.encryptionKey)) {
+            if (file.sizeBytes > 0 && wrappedKeyRepository.exists(file.encryptionKey)) {
                 emit(
                     PreviewContent.StreamedMedia(
                         remoteFileId = remoteFileId,
@@ -211,7 +211,8 @@ class PreviewContentResolver(
         onProgress: suspend (Long, Long) -> Unit
     ): File? {
         val previewDir = File(storagePaths.cacheDir, "previews").apply { mkdirs() }
-        val target = File(previewDir, "${file.id}-${file.name}")
+        val safeName = file.name.replace(Regex("[\\\\/:*?\"<>|]"), "_").ifBlank { "file" }
+        val target = File(previewDir, "${file.id}-$safeName")
         if (target.exists() && target.length() > 0) {
             cacheDao.touch(target.absolutePath, System.currentTimeMillis())
             return target

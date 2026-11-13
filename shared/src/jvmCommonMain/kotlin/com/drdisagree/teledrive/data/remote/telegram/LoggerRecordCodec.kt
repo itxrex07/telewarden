@@ -39,8 +39,10 @@ class LoggerRecordCodec(
     fun decode(caption: String): LoggerRecordMetadata? = runCatching {
         if (!isLoggerCaption(caption)) return null
         val key = wrappedKeyRepository.get(CryptoKeys.LOGGER) ?: return null
-        val encoded = caption.removePrefix(PREFIX)
-        val blob = Base64.UrlSafe.decode(encoded)
+        val encoded = caption.removePrefix(PREFIX).trim()
+        if (encoded.isEmpty()) return null
+        val padded = encoded + "=".repeat((4 - encoded.length % 4) % 4)
+        val blob = Base64.UrlSafe.decode(padded)
         val plaintext = streamCrypto.decryptBytes(key, blob)
         json.decodeFromString(LoggerRecordMetadata.serializer(), plaintext.decodeToString())
             .takeIf { it.protocol == "telewarden" && it.version == 1 && it.record_type == "encrypted_media" }

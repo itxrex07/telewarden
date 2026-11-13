@@ -88,7 +88,10 @@ class SyncRepositoryImpl(
 
     override suspend fun syncOnStart(): AppResult<SyncStats> {
         fileDao.repairBackedUpStates()
-        return runSync(incremental = fileDao.fileCount(activeChannel.id()) > 0)
+        val chatId = activeChannel.id()
+        val needsFull = fileDao.fileCount(chatId) == 0 ||
+                fileDao.hasUndecodedLoggerFiles(chatId)
+        return runSync(incremental = !needsFull)
     }
 
     override suspend fun catchUpWithRemote(): AppResult<SyncStats>? {
@@ -277,7 +280,12 @@ class SyncRepositoryImpl(
             .onFailure { SafeLog.w(TAG, "Index snapshot load failed", it) }
             .getOrNull()
             .orEmpty()
-            .filter { !isInternalDocument(it) && !manifestCodec.isLocked(it.caption) }
+            .map(::decodeLoggerDocument)
+            .filter {
+                !isInternalDocument(it) &&
+                        !manifestCodec.isLocked(it.caption) &&
+                        !loggerRecordCodec.isLocked(it.caption)
+            }
         if (documents.isEmpty()) return 0
         val folderCache = mutableMapOf<String, String?>()
         var inserted = 0
@@ -409,17 +417,31 @@ class SyncRepositoryImpl(
 
     private fun decodeLoggerDocument(document: RemoteDocument): RemoteDocument {
         val metadata = loggerRecordCodec.decode(document.caption) ?: return document
+        val resolvedName = metadata.original_filename.ifBlank { document.fileName }
+        val resolvedMime = metadata.mime_type
+            .takeIf { it.isNotBlank() && it != MimeTypes.GENERIC }
+            ?: MimeTypes.fromFileName(resolvedName).takeIf { it != MimeTypes.GENERIC }
+            ?: mimeFallbackForLoggerMediaType(metadata.media_type)
         return document.copy(
-            fileName = metadata.original_filename,
-            mimeType = metadata.mime_type,
-            sizeBytes = metadata.size_bytes,
+            fileName = resolvedName,
+            mimeType = resolvedMime,
+            sizeBytes = metadata.size_bytes.takeIf { it > 0 } ?: document.sizeBytes,
             encryptionKey = CryptoKeys.LOGGER,
             displayCaption = metadata.caption
         )
     }
 
+    private fun mimeFallbackForLoggerMediaType(mediaType: String): String = when (mediaType) {
+        "photo" -> "image/jpeg"
+        "video", "video_note", "animation" -> "video/mp4"
+        "audio" -> "audio/mpeg"
+        "voice" -> "audio/ogg"
+        else -> MimeTypes.GENERIC
+    }
+
     private fun isNewToLocal(document: RemoteDocument, known: KnownRows): Boolean {
         val existing = known.byUniqueId[document.uniqueFileId] ?: return true
+        if (document.encryptionKey == CryptoKeys.LOGGER && !existing.isEncrypted) return true
         return existing.messageId != document.messageId
     }
 
@@ -589,12 +611,18 @@ class SyncRepositoryImpl(
         }
         val folderTrashedAt = folderId?.let { folderDao.byId(it)?.trashedAt }
 
+        val existingWasUndecodedLogger = existing != null &&
+                document.encryptionKey == CryptoKeys.LOGGER &&
+                !existing.isEncrypted &&
+                existing.name.startsWith("tw_") &&
+                existing.name.endsWith(".tde")
         val name = local?.name?.takeIf { choice.keepsLocal { it.name } }
-            ?: manifest?.name ?: existing?.name
+            ?: manifest?.name
+            ?: existing?.name?.takeUnless { existingWasUndecodedLogger }
             ?: document.fileName.ifBlank { "file-${document.messageId}" }
-        val mime = manifest?.mimeType ?: document.mimeType.ifBlank {
-            MimeTypes.fromFileName(name)
-        }
+        val mime = manifest?.mimeType
+            ?: document.mimeType.takeIf { it.isNotBlank() && it != MimeTypes.GENERIC }
+            ?: MimeTypes.fromFileName(name)
 
         val now = System.currentTimeMillis()
         val trashedAt = when {

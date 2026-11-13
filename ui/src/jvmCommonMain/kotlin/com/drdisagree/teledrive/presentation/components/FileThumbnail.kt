@@ -42,7 +42,9 @@ fun FileThumbnail(
             file.category == FileCategory.VIDEO ||
             MimeTypes.isText(file.mimeType) ||
             MimeTypes.isApk(file.mimeType, file.name)
-    var failed by remember(file.id) { mutableStateOf(false) }
+    var failed by remember(file.id, file.localPath, file.isEncrypted, file.mimeType) {
+        mutableStateOf(false)
+    }
 
     BoxWithConstraints(
         modifier = modifier.background(MaterialTheme.colorScheme.surfaceContainerHigh),

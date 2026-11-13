@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
+import android.media.MediaDataSource
 import android.media.MediaMetadataRetriever
 import android.media.ThumbnailUtils
 import android.os.Build
@@ -18,13 +19,17 @@ import com.drdisagree.teledrive.core.files.Urls
 import com.drdisagree.teledrive.core.telegram.TelegramClient
 import com.drdisagree.teledrive.core.telegram.TelegramDownloadEvent
 import com.drdisagree.teledrive.data.local.dao.FileDao
+import com.drdisagree.teledrive.data.local.dao.FilePartDao
 import com.drdisagree.teledrive.data.local.dao.ThumbnailDao
 import com.drdisagree.teledrive.data.local.entity.FileEntity
 import com.drdisagree.teledrive.data.local.entity.ThumbnailEntity
 import com.drdisagree.teledrive.domain.repository.SettingsRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.File
 
@@ -35,6 +40,7 @@ import java.io.File
 class AndroidThumbnailStore(
     private val context: Context,
     private val fileDao: FileDao,
+    private val filePartDao: FilePartDao,
     private val thumbnailDao: ThumbnailDao,
     private val telegramClient: TelegramClient,
     private val streamCrypto: StreamCrypto,
@@ -90,18 +96,15 @@ class AndroidThumbnailStore(
         }
 
         val jpegBytes = if (bitmap != null) {
-            ByteArrayOutputStream().use { output ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, output)
-                bitmap.recycle()
-                output.toByteArray()
-            }
+            encodeBitmapToJpeg(bitmap)
         } else {
             val iconFileId = entity.iconFileId
-            if (iconFileId != null) {
+            val remoteBytes = if (iconFileId != null) {
                 fetchIconBytes(entity, iconFileId) ?: fetchRemoteThumbnail(entity)
             } else {
                 fetchRemoteThumbnail(entity)
             }
+            remoteBytes ?: generateEncryptedRemoteBitmap(entity)?.let(::encodeBitmapToJpeg)
         } ?: return null
 
         val encrypt = settingsRepository.preferences.first().encryptThumbnails
@@ -226,7 +229,8 @@ class AndroidThumbnailStore(
         val path = readyPath ?: return null
         val rawBytes = runCatching { File(path).readBytes() }.getOrNull() ?: return null
         return if (entity.isEncrypted) {
-            val key = wrappedKeyRepository.get(CryptoKeys.CONTENT) ?: return null
+            val key = wrappedKeyRepository.get(entity.encryptionKey.ifBlank { CryptoKeys.CONTENT })
+                ?: return null
             runCatching { streamCrypto.decryptBytes(key, rawBytes) }.getOrNull()
         } else {
             rawBytes
@@ -242,11 +246,157 @@ class AndroidThumbnailStore(
         return runCatching { telegramClient.fetchThumbnail(chatId, messageId) }.getOrNull()
     }
 
+    private suspend fun generateEncryptedRemoteBitmap(entity: FileEntity): Bitmap? {
+        if (!entity.isEncrypted) return null
+        val remoteFileId = entity.remoteFileId ?: return null
+        val isImage = MimeTypes.isImage(entity.mimeType)
+        val isVideo = MimeTypes.isVideo(entity.mimeType)
+        val isApk = MimeTypes.isApk(entity.mimeType, entity.name)
+        if (!isImage && !isVideo && !isApk) return null
+
+        val keyName = entity.encryptionKey.ifBlank { CryptoKeys.CONTENT }
+        val key = wrappedKeyRepository.get(keyName) ?: return null
+
+        val safeName = sanitizeName(entity.name)
+        val previewCached = File(File(context.cacheDir, "previews"), "${entity.id}-$safeName")
+        if (previewCached.exists() && previewCached.length() > 0) {
+            decodeThumbnail(previewCached, entity.mimeType)?.let { return it }
+        }
+
+        if (isVideo) {
+            extractRemoteEncryptedVideoFrame(entity, remoteFileId, key)?.let { return it }
+        }
+
+        if (entity.partCount <= 1 && entity.sizeBytes in 1L..REMOTE_ENCRYPTED_THUMB_LIMIT) {
+            return decodeSmallEncryptedRemoteFile(entity, remoteFileId, key, safeName)
+        }
+        return null
+    }
+
+    private suspend fun decodeSmallEncryptedRemoteFile(
+        entity: FileEntity,
+        remoteFileId: String,
+        key: ByteArray,
+        safeName: String
+    ): Bitmap? {
+        var readyPath: String? = null
+        runCatching {
+            telegramClient.downloadDocument(remoteFileId).collect { event ->
+                if (event is TelegramDownloadEvent.Completed) {
+                    readyPath = event.localPath
+                }
+            }
+        }
+        val source = readyPath?.let(::File)?.takeIf { it.exists() } ?: return null
+        val tempDir = File(context.cacheDir, "thumb-temp").apply { mkdirs() }
+        val tempFile = File(tempDir, "${entity.id}-$safeName")
+        return try {
+            val decrypted = runCatching {
+                source.inputStream().buffered().use { input ->
+                    tempFile.outputStream().buffered().use { output ->
+                        streamCrypto.decryptStream(key, input, output)
+                    }
+                }
+            }.isSuccess
+            if (!decrypted || !tempFile.exists() || tempFile.length() <= 0L) {
+                null
+            } else {
+                decodeThumbnail(tempFile, entity.mimeType)
+            }
+        } finally {
+            tempFile.delete()
+        }
+    }
+
+    private suspend fun extractRemoteEncryptedVideoFrame(
+        entity: FileEntity,
+        remoteFileId: String,
+        key: ByteArray
+    ): Bitmap? = withContext(Dispatchers.IO) {
+        val parts = if (entity.partCount > 1) {
+            filePartDao.partsOf(entity.id).mapNotNull { part ->
+                part.remoteFileId?.let { MediaPart(it, part.plainOffset, part.plainSize) }
+            }
+        } else {
+            if (entity.sizeBytes <= 0L) return@withContext null
+            listOf(MediaPart(remoteFileId, 0L, entity.sizeBytes))
+        }
+        if (parts.isEmpty()) return@withContext null
+
+        val source = PartedMediaByteSource(
+            telegramClient = telegramClient,
+            streamCrypto = streamCrypto,
+            parts = parts,
+            encrypted = true,
+            contentKey = key
+        )
+        val totalSize = runCatching { source.size() }.getOrDefault(0L)
+        if (totalSize <= 0L) {
+            runCatching { source.close() }
+            return@withContext null
+        }
+
+        val dataSource = object : MediaDataSource() {
+            override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
+                if (position < 0L || position >= totalSize) return -1
+                if (size <= 0) return 0
+                val capped = minOf(size.toLong(), totalSize - position).toInt()
+                var totalRead = 0
+                while (totalRead < capped) {
+                    val chunk = runCatching {
+                        runBlocking { source.read(position + totalRead, capped - totalRead) }
+                    }.getOrNull() ?: return if (totalRead > 0) totalRead else -1
+                    if (chunk.isEmpty()) break
+                    System.arraycopy(chunk, 0, buffer, offset + totalRead, chunk.size)
+                    totalRead += chunk.size
+                }
+                return if (totalRead == 0) -1 else totalRead
+            }
+
+            override fun getSize(): Long = totalSize
+
+            override fun close() {
+                source.close()
+            }
+        }
+
+        val retriever = MediaMetadataRetriever()
+        try {
+            runCatching {
+                retriever.setDataSource(dataSource)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                    retriever.getScaledFrameAtTime(
+                        -1L,
+                        MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                        MAX_DIMENSION,
+                        MAX_DIMENSION
+                    ) ?: retriever.frameAtTime
+                } else {
+                    retriever.frameAtTime
+                }
+            }.getOrNull()
+        } finally {
+            runCatching { retriever.release() }
+            runCatching { dataSource.close() }
+        }
+    }
+
+    private fun encodeBitmapToJpeg(bitmap: Bitmap): ByteArray =
+        ByteArrayOutputStream().use { output ->
+            bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, output)
+            bitmap.recycle()
+            output.toByteArray()
+        }
+
+    private fun sanitizeName(name: String): String =
+        name.replace(Regex("[\\\\/:*?\"<>|]"), "_").ifBlank { "file" }
+
     private fun thumbnailKey(): ByteArray =
         wrappedKeyRepository.getOrCreate(CryptoKeys.THUMBNAIL)
 
     companion object {
         private const val LINK_NOTE_LIMIT = 8L * 1024
+        private const val REMOTE_ENCRYPTED_THUMB_LIMIT = 20L * 1024 * 1024
         private const val MAX_DIMENSION = 512
         private const val JPEG_QUALITY = 82
     }
