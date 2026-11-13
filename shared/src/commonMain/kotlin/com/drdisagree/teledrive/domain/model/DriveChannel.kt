@@ -18,12 +18,21 @@ data class DriveChannel(
 
     /** The part the user chose, empty for a drive that was never named. */
     val label: String
-        get() = if (isLinkedChat) title else title.removePrefix(DRIVE_PREFIX).trim()
+        get() = if (isLinkedChat) {
+            title
+        } else {
+            when {
+                title.startsWith(DRIVE_PREFIX) -> title.removePrefix(DRIVE_PREFIX).trim()
+                title.startsWith(LEGACY_DRIVE_PREFIX) -> title.removePrefix(LEGACY_DRIVE_PREFIX).trim()
+                else -> title.trim()
+            }
+        }
 
     val displayName: String
         get() = if (isLinkedChat) title.ifEmpty { DRIVE_PREFIX } else label.ifEmpty { DRIVE_PREFIX }
 
     companion object {
-        const val DRIVE_PREFIX = "TeleDrive"
+        const val DRIVE_PREFIX = "TeleWarden"
+        const val LEGACY_DRIVE_PREFIX = "TeleDrive"
     }
 }

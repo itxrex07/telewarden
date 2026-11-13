@@ -1,6 +1,6 @@
 <resources>
     <!-- App-wide -->
-    <string name="app_name">TeleDrive</string>
+    <string name="app_name">TeleWarden</string>
     <string name="app_backed_up">Backed up</string>
     <string name="app_drive_recreated">Your drive was deleted in Telegram, so a new empty one was created</string>
     <string name="app_no_results">No results</string>
@@ -132,8 +132,8 @@
 
     <!-- App lock -->
     <string name="lock_no_screen_lock">Screen lock is not available on this device. Unlocking.</string>
-    <string name="lock_prompt_title">Unlock TeleDrive</string>
-    <string name="lock_screen_title">TeleDrive is locked</string>
+    <string name="lock_prompt_title">Unlock TeleWarden</string>
+    <string name="lock_screen_title">TeleWarden is locked</string>
     <string name="lock_too_many_attempts">Too many attempts. Try again later.</string>
     <string name="lock_unlock">Unlock</string>
     <string name="session_broken_action">Sign in again</string>
@@ -160,7 +160,7 @@
     <string name="onboarding_api_id">API ID</string>
     <string name="onboarding_api_id_number">API ID must be a number</string>
     <string name="onboarding_choose_api_dev_tools">Choose &quot;API development tools&quot; and create an app. Any name works.</string>
-    <string name="onboarding_copy_api_keys">Copy the api_id and api_hash into TeleDrive.</string>
+    <string name="onboarding_copy_api_keys">Copy the api_id and api_hash into TeleWarden.</string>
     <string name="onboarding_get_api_keys">Get your API keys</string>
     <string name="onboarding_my_telegram_org">my.telegram.org</string>
     <string name="onboarding_one_time_setup_keys">One-time setup. Your keys stay on this device, encrypted.</string>
@@ -224,7 +224,7 @@
     <string name="onboarding_allow_media">Allow media access</string>
     <string name="onboarding_files_access_covers_documents">All-files access covers documents, downloads and SD card folders. Without it those folders cannot be backed up.</string>
     <string name="onboarding_storage_access">Storage access</string>
-    <string name="onboarding_teledrive_needs_media_files">TeleDrive needs your media and your files to back them up, and notifications to show transfer progress.</string>
+    <string name="onboarding_teledrive_needs_media_files">TeleWarden needs your media and your files to back them up, and notifications to show transfer progress.</string>
 
     <!-- Onboarding: drive setup -->
     <string name="onboarding_channel_files_in_channel">%1$d files in this channel</string>
@@ -233,7 +233,7 @@
     <string name="onboarding_drive_ready">Your drive is ready</string>
     <string name="onboarding_looking_for_drives">Looking for your drives</string>
     <string name="onboarding_no_drive_yet">No drive could be created</string>
-    <string name="onboarding_pick_drive_desc">Your account already has TeleDrive channels. Pick the one to open on this device; you can switch or add more in Settings.</string>
+    <string name="onboarding_pick_drive_desc">Your account already has TeleWarden channels. Pick the one to open on this device; you can switch or add more in Settings.</string>
     <string name="onboarding_single_drive_desc">Files back up to this private channel on your account. You can add more drives later in Settings.</string>
 
     <!-- Onboarding: backup setup -->
@@ -561,7 +561,7 @@
 
     <!-- Drives and channels -->
     <string name="channels_channel_container">channel-container</string>
-    <string name="channels_create_one_teledrive_store">Create one and TeleDrive will store your files in that private channel.</string>
+    <string name="channels_create_one_teledrive_store">Create one and TeleWarden will store your files in that private channel.</string>
     <string name="channels_creates_private_channel_account">Creates a private channel on your account. The name helps you tell your drives apart.</string>
     <string name="channels_creating_drive">Creating drive</string>
     <string name="channels_delete_confirm_hint">Type %1$s to confirm</string>
@@ -613,7 +613,7 @@
     <string name="settings_rebuild_index_telegram">Rebuild index from Telegram</string>
     <string name="settings_removes_session_stored_api">Removes the session and stored API credentials</string>
     <string name="settings_restores_file_list">Restores the file list from your storage channel</string>
-    <string name="settings_shown_channels_private_owned">Shown channels are private, owned by you, and named TeleDrive.</string>
+    <string name="settings_shown_channels_private_owned">Shown channels are private, owned by you, and named TeleWarden.</string>
     <string name="settings_state_connected">Connected</string>
     <string name="settings_state_connecting">Connecting</string>
     <string name="settings_state_syncing">Syncing</string>
@@ -645,7 +645,7 @@
     <string name="settings_clear_cache_action">Clear cache</string>
     <string name="settings_clear_cache_title">Clear cache?</string>
     <string name="settings_download_location">Download location</string>
-    <string name="settings_download_location_default">Downloads/TeleDrive</string>
+    <string name="settings_download_location_default">Downloads/TeleWarden</string>
     <string name="settings_download_location_reset">Reset download location</string>
     <string name="settings_free_up_subtitle">%1$s of backed-up files stored locally</string>
     <string name="settings_free_up_none">No backed-up files are taking local space</string>
@@ -821,9 +821,9 @@
     <!-- Permissions -->
     <string name="permission_all_files_rationale">Needed to back up documents, downloads and SD card folders</string>
     <string name="permission_all_files_title">All files access</string>
-    <string name="permission_battery_rationale">Keeps uploads and syncing going after you close TeleDrive</string>
+    <string name="permission_battery_rationale">Keeps uploads and syncing going after you close TeleWarden</string>
     <string name="permission_battery_title">Unrestricted battery use</string>
-    <string name="permission_missing_message">TeleDrive cannot read your %1$s without permission.</string>
+    <string name="permission_missing_message">TeleWarden cannot read your %1$s without permission.</string>
     <string name="permission_not_allowed">Not allowed \u00b7 %1$s</string>
     <string name="permission_notifications_rationale">Shows transfer and backup progress</string>
     <string name="permission_notifications_title">Notifications</string>

@@ -95,7 +95,7 @@ fun AccountQuotaBar(
                 }
                 Column {
                     Text(
-                        text = activeChannel?.displayName ?: "TeleDrive Cloud",
+                        text = activeChannel?.displayName ?: "TeleWarden Cloud",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,

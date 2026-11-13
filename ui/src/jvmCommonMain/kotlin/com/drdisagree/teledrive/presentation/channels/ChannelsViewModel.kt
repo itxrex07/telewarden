@@ -114,7 +114,7 @@ class ChannelsViewModel(
             val label = when (mode) {
                 DriveSyncMode.SAFE -> "Safe Mode"
                 DriveSyncMode.READ_ONLY -> "Read-Only Mode"
-                DriveSyncMode.FULL -> "Full TeleDrive Mode"
+                DriveSyncMode.FULL -> "Full TeleWarden Mode"
             }
             _messages.tryEmit(UiText.Plain("Drive mode updated to $label"))
             autoPushCloudProfile()

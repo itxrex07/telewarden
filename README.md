@@ -1,6 +1,6 @@
-# TeleDrive Android
+# TeleWarden Android
 
-TeleDrive is an Android app for backing up and browsing files through Telegram.
+TeleWarden is an Android app for backing up and browsing files through Telegram.
 This repository contains the Android application and the shared Kotlin/Compose
 code required to build it; desktop and web targets are not included.
 

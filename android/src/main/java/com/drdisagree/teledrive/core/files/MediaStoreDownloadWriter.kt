@@ -112,7 +112,7 @@ class MediaStoreDownloadWriter(
 
     private companion object {
         const val TAG = "DownloadWriter"
-        const val FOLDER_NAME = "TeleDrive"
+        const val FOLDER_NAME = "TeleWarden"
         val RELATIVE_PATH = "${Environment.DIRECTORY_DOWNLOADS}/$FOLDER_NAME"
     }
 }

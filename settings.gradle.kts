@@ -36,7 +36,7 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "TeleDrive"
+rootProject.name = "TeleWarden"
 include(":app")
 include(":shared")
 include(":ui")

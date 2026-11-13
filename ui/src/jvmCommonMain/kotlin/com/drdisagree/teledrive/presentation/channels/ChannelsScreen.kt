@@ -714,7 +714,7 @@ internal fun ExistingChatPickerDialog(
                                                 TelegramChatType.CHANNEL -> "Channel"
                                                 TelegramChatType.GROUP -> "Group"
                                                 TelegramChatType.SAVED_MESSAGES -> "Personal Cloud"
-                                                TelegramChatType.DRIVE_CHANNEL -> "TeleDrive Channel"
+                                                TelegramChatType.DRIVE_CHANNEL -> "TeleWarden Channel"
                                             }
                                         )
                                         if (chat.subtitle.isNotBlank()) {
@@ -772,7 +772,7 @@ private fun SyncModeDialog(
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 SyncModeOptionRow(
                     title = "Safe Mode (Recommended for shared chats)",
-                    description = "Browse, download, and upload files without posting TeleDrive JSON index files or editing existing captions.",
+                    description = "Browse, download, and upload files without posting TeleWarden JSON index files or editing existing captions.",
                     selected = selected == DriveSyncMode.SAFE,
                     onClick = { selected = DriveSyncMode.SAFE }
                 )
@@ -783,8 +783,8 @@ private fun SyncModeDialog(
                     onClick = { selected = DriveSyncMode.READ_ONLY }
                 )
                 SyncModeOptionRow(
-                    title = "Full TeleDrive Mode",
-                    description = "Full metadata sync — stores folder trees and file manifests inside the chat for cross-device TeleDrive sync.",
+                    title = "Full TeleWarden Mode",
+                    description = "Full metadata sync — stores folder trees and file manifests inside the chat for cross-device TeleWarden sync.",
                     selected = selected == DriveSyncMode.FULL,
                     onClick = { selected = DriveSyncMode.FULL }
                 )

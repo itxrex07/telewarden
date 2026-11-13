@@ -617,15 +617,24 @@ class TdLibTelegramClient(
 
 
     private fun driveTitle(label: String): String {
-        val trimmed = label.trim()
-            .removePrefix(STORAGE_CHAT_TITLE)
-            .trim()
-            .take(MAX_LABEL_LENGTH)
+        val raw = label.trim()
+        val stripped = when {
+            raw.startsWith(STORAGE_CHAT_TITLE) -> raw.removePrefix(STORAGE_CHAT_TITLE)
+            raw.startsWith(LEGACY_STORAGE_CHAT_TITLE) -> raw.removePrefix(LEGACY_STORAGE_CHAT_TITLE)
+            else -> raw
+        }
+        val trimmed = stripped.trim().take(MAX_LABEL_LENGTH)
         return if (trimmed.isEmpty()) STORAGE_CHAT_TITLE else "$STORAGE_CHAT_TITLE $trimmed"
     }
 
     private fun isDriveTitle(title: String): Boolean =
-        title == STORAGE_CHAT_TITLE || title.startsWith("$STORAGE_CHAT_TITLE ")
+        title == STORAGE_CHAT_TITLE ||
+                title.startsWith("$STORAGE_CHAT_TITLE ") ||
+                title == LEGACY_STORAGE_CHAT_TITLE ||
+                title.startsWith("$LEGACY_STORAGE_CHAT_TITLE ")
+
+    private fun isExactDriveTitle(title: String): Boolean =
+        title == STORAGE_CHAT_TITLE || title == LEGACY_STORAGE_CHAT_TITLE
 
     private suspend fun awaitAuthorized() {
         if (_authState.value == TelegramAuthState.Ready) return
@@ -645,10 +654,12 @@ class TdLibTelegramClient(
         val knownIds = known.map { it.chatId }.toSet()
 
         val candidates = LinkedHashSet<Long>()
-        runCatching { send(TdApi.SearchChatsOnServer(STORAGE_CHAT_TITLE, CHAT_SEARCH_LIMIT)) }
-            .getOrNull()?.chatIds?.forEach { candidates.add(it) }
-        runCatching { send(TdApi.SearchChats(STORAGE_CHAT_TITLE, CHAT_SEARCH_LIMIT)) }
-            .getOrNull()?.chatIds?.forEach { candidates.add(it) }
+        for (query in listOf(STORAGE_CHAT_TITLE, LEGACY_STORAGE_CHAT_TITLE)) {
+            runCatching { send(TdApi.SearchChatsOnServer(query, CHAT_SEARCH_LIMIT)) }
+                .getOrNull()?.chatIds?.forEach { candidates.add(it) }
+            runCatching { send(TdApi.SearchChats(query, CHAT_SEARCH_LIMIT)) }
+                .getOrNull()?.chatIds?.forEach { candidates.add(it) }
+        }
         for (chatList in listOf(TdApi.ChatListMain(), TdApi.ChatListArchive())) {
             loadEveryChat(chatList, maxPages = 2)
             runCatching { send(TdApi.GetChats(chatList, 150)) }
@@ -838,12 +849,14 @@ class TdLibTelegramClient(
     private suspend fun findStorageChat(): Long? {
         val candidates = LinkedHashSet<Long>()
 
-        runCatching { send(TdApi.SearchChatsOnServer(STORAGE_CHAT_TITLE, CHAT_SEARCH_LIMIT)) }
-            .onFailure { SafeLog.d(TAG, "Server chat search failed: ${it.message}") }
-            .getOrNull()?.chatIds?.forEach { candidates.add(it) }
-        runCatching { send(TdApi.SearchChats(STORAGE_CHAT_TITLE, CHAT_SEARCH_LIMIT)) }
-            .onFailure { SafeLog.d(TAG, "Local chat search failed: ${it.message}") }
-            .getOrNull()?.chatIds?.forEach { candidates.add(it) }
+        for (query in listOf(STORAGE_CHAT_TITLE, LEGACY_STORAGE_CHAT_TITLE)) {
+            runCatching { send(TdApi.SearchChatsOnServer(query, CHAT_SEARCH_LIMIT)) }
+                .onFailure { SafeLog.d(TAG, "Server chat search failed: ${it.message}") }
+                .getOrNull()?.chatIds?.forEach { candidates.add(it) }
+            runCatching { send(TdApi.SearchChats(query, CHAT_SEARCH_LIMIT)) }
+                .onFailure { SafeLog.d(TAG, "Local chat search failed: ${it.message}") }
+                .getOrNull()?.chatIds?.forEach { candidates.add(it) }
+        }
 
         matchStorageChat(candidates)?.let { return it }
 
@@ -866,7 +879,7 @@ class TdLibTelegramClient(
             runCatching {
                 val chat = send(TdApi.GetChat(chatId))
                 val type = chat.type as? TdApi.ChatTypeSupergroup ?: return@runCatching null
-                if (!type.isChannel || chat.title != STORAGE_CHAT_TITLE) {
+                if (!type.isChannel || !isExactDriveTitle(chat.title)) {
                     null
                 } else {
                     chatId to type.supergroupId
@@ -920,7 +933,7 @@ class TdLibTelegramClient(
         for (chatId in chatIds) {
             val adopted = runCatching {
                 val chat = send(TdApi.GetChat(chatId))
-                if (chat.title != STORAGE_CHAT_TITLE) return@runCatching null
+                if (!isExactDriveTitle(chat.title)) return@runCatching null
                 val type = chat.type as? TdApi.ChatTypeSupergroup ?: return@runCatching null
                 if (!type.isChannel) return@runCatching null
                 if (!isOwnPrivateChannel(type.supergroupId)) return@runCatching null
@@ -1561,7 +1574,8 @@ class TdLibTelegramClient(
         private const val HISTORY_RETRY_MS = 400L
         private const val PHOTO_PRIORITY = 16
         private const val MAX_LABEL_LENGTH = 48
-        private const val STORAGE_CHAT_TITLE = "TeleDrive"
+        private const val STORAGE_CHAT_TITLE = "TeleWarden"
+        private const val LEGACY_STORAGE_CHAT_TITLE = "TeleDrive"
         private const val CLOSE_WAIT_LIMIT_MS = 5_000L
         private const val PREVIEW_PRIORITY = 1
         const val STORAGE_CHAT_MARKER = "#teledrive-storage"
