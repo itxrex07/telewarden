@@ -141,7 +141,8 @@ fun MediaPlayer(
                     val factory = if (content.parts.isNotEmpty()) {
                         dataSourceFactory.createParted(
                             parts = content.parts,
-                            encrypted = content.encrypted
+                            encrypted = content.encrypted,
+                            encryptionKey = content.encryptionKey
                         )
                     } else {
                         dataSourceFactory.create(content.remoteFileId)

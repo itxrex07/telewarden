@@ -4,6 +4,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.drdisagree.teledrive.core.common.AppResult
 import com.drdisagree.teledrive.core.files.DeleteConsentRequest
+import com.drdisagree.teledrive.core.crypto.CryptoKeys
+import com.drdisagree.teledrive.core.crypto.WrappedKeyRepository
 import com.drdisagree.teledrive.core.logging.DebugLogRecorder
 import com.drdisagree.teledrive.core.permissions.PermissionChecker
 import com.drdisagree.teledrive.core.security.AppLockManager
@@ -58,6 +60,8 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.io.encoding.Base64
+import java.security.SecureRandom
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class SettingsViewModel(
@@ -67,6 +71,7 @@ class SettingsViewModel(
     private val cacheRepository: CacheRepository,
     private val fileRepository: FileRepository,
     private val keyBackupRepository: KeyBackupRepository,
+    private val wrappedKeyRepository: WrappedKeyRepository,
     private val cloudSyncRepository: CloudSyncRepository,
     private val syncRepository: SyncRepository,
     private val localDataWiper: LocalDataWiper,
@@ -93,6 +98,12 @@ class SettingsViewModel(
 
     private val _keyBackupWorking = MutableStateFlow(false)
     val keyBackupWorking: StateFlow<Boolean> = _keyBackupWorking.asStateFlow()
+
+    private val _loggerKeyConfigured = MutableStateFlow(wrappedKeyRepository.exists(CryptoKeys.LOGGER))
+    val loggerKeyConfigured: StateFlow<Boolean> = _loggerKeyConfigured.asStateFlow()
+
+    private val _loggerKeyExport = MutableStateFlow<String?>(null)
+    val loggerKeyExport: StateFlow<String?> = _loggerKeyExport.asStateFlow()
 
     val cloudSyncing: StateFlow<Boolean> = cloudSyncRepository.syncing
 
@@ -275,6 +286,44 @@ class SettingsViewModel(
                 is AppResult.Failure -> _messages.tryEmit(result.error.toUiText())
             }
         }
+    }
+
+    fun generateLoggerKey() {
+        val key = ByteArray(32).also(SecureRandom()::nextBytes)
+        wrappedKeyRepository.store(CryptoKeys.LOGGER, key)
+        _loggerKeyConfigured.value = true
+        _loggerKeyExport.value = Base64.UrlSafe.encode(key).trimEnd('=')
+        _messages.tryEmit(UiText.Plain("Logger key generated. Export it to twlog.py and keep it safe."))
+    }
+
+    fun exportLoggerKey() {
+        val key = wrappedKeyRepository.get(CryptoKeys.LOGGER)
+        _loggerKeyExport.value = key?.let { Base64.UrlSafe.encode(it).trimEnd('=') }
+        if (key == null) _messages.tryEmit(UiText.Plain("No logger key is configured."))
+    }
+
+    fun importLoggerKey(encoded: String) {
+        runCatching {
+            val normalized = encoded.trim()
+            val padded = normalized + "=".repeat((4 - normalized.length % 4) % 4)
+            val key = Base64.UrlSafe.decode(padded)
+            require(key.size == 32)
+            wrappedKeyRepository.store(CryptoKeys.LOGGER, key)
+        }.onSuccess {
+            _loggerKeyConfigured.value = true
+            _loggerKeyExport.value = null
+            _messages.tryEmit(UiText.Plain("Logger key imported."))
+            viewModelScope.launch { syncRepository.fullResync() }
+        }.onFailure {
+            _messages.tryEmit(UiText.Plain("Invalid logger key. Use the URL-safe base64 32-byte key from twlog.py."))
+        }
+    }
+
+    fun removeLoggerKey() {
+        wrappedKeyRepository.remove(CryptoKeys.LOGGER)
+        _loggerKeyConfigured.value = false
+        _loggerKeyExport.value = null
+        _messages.tryEmit(UiText.Plain("Logger key removed. Logger media will remain locked."))
     }
 
     val reclaimableBytes: StateFlow<Long> = fileRepository.observeReclaimableBytes()

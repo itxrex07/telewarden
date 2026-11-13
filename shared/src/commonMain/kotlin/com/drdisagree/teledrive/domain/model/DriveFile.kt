@@ -19,6 +19,7 @@ data class DriveFile(
     val isFavorite: Boolean,
     val isAvailableOffline: Boolean = false,
     val isEncrypted: Boolean,
+    val encryptionKey: String = "content",
     val width: Int?,
     val height: Int?,
     val durationMs: Long?,

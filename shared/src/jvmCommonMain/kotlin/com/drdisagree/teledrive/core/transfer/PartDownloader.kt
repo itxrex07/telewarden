@@ -28,7 +28,7 @@ class PartDownloader(
     private val dispatchers: DispatcherProvider
 ) {
 
-    fun download(fileId: String, encrypted: Boolean): Flow<PartDownloadEvent> = flow {
+    fun download(fileId: String, encrypted: Boolean, encryptionKey: String = CryptoKeys.CONTENT): Flow<PartDownloadEvent> = flow {
         val parts = filePartDao.partsOf(fileId)
         if (parts.isEmpty()) error("File has no parts on record")
 
@@ -55,7 +55,7 @@ class PartDownloader(
                 ?: error("Part ${part.partIndex + 1} did not download")
 
             emit(PartDownloadEvent.Joining(part.partIndex))
-            withContext(dispatchers.io) { appendPart(source, target, encrypted) }
+            withContext(dispatchers.io) { appendPart(source, target, encrypted, encryptionKey) }
 
             written += part.plainSize
             emit(PartDownloadEvent.Progress(written))
@@ -68,11 +68,11 @@ class PartDownloader(
         withContext(dispatchers.io) { File(assemblyDir(), fileId).delete() }
     }
 
-    private fun appendPart(source: File, target: File, encrypted: Boolean) {
+    private fun appendPart(source: File, target: File, encrypted: Boolean, encryptionKey: String) {
         FileOutputStream(target, true).buffered().use { output ->
             if (encrypted) {
-                val key = wrappedKeyRepository.get(CryptoKeys.CONTENT)
-                    ?: throw KeyUnavailableException(CryptoKeys.CONTENT)
+                val key = wrappedKeyRepository.get(encryptionKey)
+                    ?: throw KeyUnavailableException(encryptionKey)
                 source.inputStream().buffered().use { input ->
                     streamCrypto.decryptStream(key, input, output)
                 }

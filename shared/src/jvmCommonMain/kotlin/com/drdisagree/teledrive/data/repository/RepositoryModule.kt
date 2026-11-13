@@ -1,6 +1,7 @@
 package com.drdisagree.teledrive.data.repository
 
 import com.drdisagree.teledrive.core.telegram.TelegramSession
+import com.drdisagree.teledrive.data.remote.telegram.LoggerRecordCodec
 import com.drdisagree.teledrive.data.remote.telegram.ManifestCodec
 import com.drdisagree.teledrive.domain.repository.BackupRepository
 import com.drdisagree.teledrive.domain.repository.CacheRepository
@@ -21,6 +22,7 @@ import org.koin.dsl.module
 
 val repositoryModule = module {
     singleOf(::ManifestCodec)
+    singleOf(::LoggerRecordCodec)
     singleOf(::ActiveChannel)
     singleOf(::ChannelOwnership)
     singleOf(::FolderOwnershipRepair)

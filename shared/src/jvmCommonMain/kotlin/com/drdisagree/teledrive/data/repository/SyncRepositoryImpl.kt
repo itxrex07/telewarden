@@ -4,6 +4,7 @@ import com.drdisagree.teledrive.core.common.AppError
 import com.drdisagree.teledrive.core.common.AppResult
 import com.drdisagree.teledrive.core.common.SafeLog
 import com.drdisagree.teledrive.core.crypto.KeyBackupCodec
+import com.drdisagree.teledrive.core.crypto.CryptoKeys
 import com.drdisagree.teledrive.core.files.MimeTypes
 import com.drdisagree.teledrive.core.publish.PublishScheduler
 import com.drdisagree.teledrive.core.telegram.RemoteDocument
@@ -21,6 +22,7 @@ import com.drdisagree.teledrive.data.local.entity.FilePartEntity
 import com.drdisagree.teledrive.data.local.entity.FolderEntity
 import com.drdisagree.teledrive.data.remote.telegram.ExtraFields
 import com.drdisagree.teledrive.data.remote.telegram.IndexSnapshotFile
+import com.drdisagree.teledrive.data.remote.telegram.LoggerRecordCodec
 import com.drdisagree.teledrive.data.remote.telegram.ManifestCodec
 import com.drdisagree.teledrive.data.remote.telegram.RemoteFileManifest
 import com.drdisagree.teledrive.data.remote.telegram.RemoteFolderState
@@ -52,6 +54,7 @@ class SyncRepositoryImpl(
     private val telegramClient: TelegramClient,
     private val fileDao: FileDao,
     private val manifestCodec: ManifestCodec,
+    private val loggerRecordCodec: LoggerRecordCodec,
     private val pendingDeleteDao: PendingDeleteDao,
     private val filePartDao: FilePartDao,
     private val folderDao: FolderDao,
@@ -213,20 +216,21 @@ class SyncRepositoryImpl(
                 }
                 throw e
             }
-            SafeLog.d(TAG, "Sync page ${page.documents.size} documents")
-            if (page.documents.isEmpty() && page.nextFromMessageId == 0L) break
+            val decodedPage = page.copy(documents = page.documents.map(::decodeLoggerDocument))
+            SafeLog.d(TAG, "Sync page ${decodedPage.documents.size} documents")
+            if (decodedPage.documents.isEmpty() && decodedPage.nextFromMessageId == 0L) break
 
             var reachedKnown = false
-            val known = existingForPage(page.documents)
+            val known = existingForPage(decodedPage.documents)
             database.inImmediateTransaction {
-                for (document in page.documents) {
+                for (document in decodedPage.documents) {
                     seenMessageIds.add(document.messageId)
                     // Still in the chat, but a delete is owed for it.
                     if (document.messageId in pendingDeletes) continue
                     if (indexSnapshot.isSnapshot(document)) snapshots += document
                     if (isInternalDocument(document)) continue
                     channelDocuments += document
-                    if (manifestCodec.isLocked(document.caption)) {
+                    if (manifestCodec.isLocked(document.caption) || loggerRecordCodec.isLocked(document.caption)) {
                         locked++
                         continue
                     }
@@ -252,8 +256,8 @@ class SyncRepositoryImpl(
                     partial = true
                 )
             }
-            if (page.nextFromMessageId == 0L) break
-            fromMessageId = page.nextFromMessageId
+            if (decodedPage.nextFromMessageId == 0L) break
+            fromMessageId = decodedPage.nextFromMessageId
         }
 
         if (isFullMode && captionRepairsQueued.size > repairsBefore) publishScheduler.kick()
@@ -359,6 +363,7 @@ class SyncRepositoryImpl(
             val documents = updated.sortedDescending()
                 .filter { it !in pendingDeletes }
                 .mapNotNull { telegramClient.getDocument(chatId, it) }
+                .map(::decodeLoggerDocument)
 
             if (isFullMode && documents.any { it.isFolderState() }) {
                 runCatching { folderStateSynchronizer.pull() }
@@ -367,7 +372,8 @@ class SyncRepositoryImpl(
             }
 
             val files = documents.filter {
-                !isInternalDocument(it) && !manifestCodec.isLocked(it.caption)
+                !isInternalDocument(it) && !manifestCodec.isLocked(it.caption) &&
+                        !loggerRecordCodec.isLocked(it.caption)
             }
             if (files.isNotEmpty()) {
                 val repairsBefore = captionRepairsQueued.size
@@ -400,6 +406,17 @@ class SyncRepositoryImpl(
                 document.caption.startsWith(IndexSnapshotFile.MARKER) ||
                 document.caption.startsWith(KEY_BACKUP_MARKER) ||
                 document.caption.startsWith(ICON_MARKER)
+
+    private fun decodeLoggerDocument(document: RemoteDocument): RemoteDocument {
+        val metadata = loggerRecordCodec.decode(document.caption) ?: return document
+        return document.copy(
+            fileName = metadata.original_filename,
+            mimeType = metadata.mime_type,
+            sizeBytes = metadata.size_bytes,
+            encryptionKey = CryptoKeys.LOGGER,
+            displayCaption = metadata.caption
+        )
+    }
 
     private fun isNewToLocal(document: RemoteDocument, known: KnownRows): Boolean {
         val existing = known.byUniqueId[document.uniqueFileId] ?: return true
@@ -615,8 +632,10 @@ class SyncRepositoryImpl(
             isFavorite = local?.isFavorite?.takeIf { choice.keepsLocal { it.favorite } }
                 ?: manifest?.favorite ?: existing?.isFavorite ?: false,
             isAvailableOffline = existing?.isAvailableOffline == true,
-            isEncrypted = manifest?.encrypted
-                ?: manifestCodec.isEncryptedManifest(document.caption),
+            isEncrypted = manifest?.encrypted ?: (
+                document.encryptionKey != null || manifestCodec.isEncryptedManifest(document.caption)
+            ),
+            encryptionKey = document.encryptionKey ?: existing?.encryptionKey ?: CryptoKeys.CONTENT,
             width = manifest?.width ?: existing?.width,
             height = manifest?.height ?: existing?.height,
             durationMs = manifest?.durationMs ?: existing?.durationMs,

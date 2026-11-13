@@ -86,14 +86,15 @@ class PreviewContentResolver(
             }
             val primaryRemoteId = remoteFileId ?: mediaParts.firstOrNull()?.remoteFileId
             if (primaryRemoteId != null && mediaParts.size == parts.size &&
-                (!file.isEncrypted || wrappedKeyRepository.exists(CryptoKeys.CONTENT))
+                (!file.isEncrypted || wrappedKeyRepository.exists(file.encryptionKey))
             ) {
                 emit(
                     PreviewContent.StreamedMedia(
                         remoteFileId = primaryRemoteId,
                         isAudio = file.category == FileCategory.AUDIO,
                         parts = mediaParts,
-                        encrypted = file.isEncrypted
+                        encrypted = file.isEncrypted,
+                        encryptionKey = file.encryptionKey
                     )
                 )
                 return@flow
@@ -111,13 +112,14 @@ class PreviewContentResolver(
                 return@flow
             }
 
-            if (wrappedKeyRepository.exists(CryptoKeys.CONTENT)) {
+            if (wrappedKeyRepository.exists(file.encryptionKey)) {
                 emit(
                     PreviewContent.StreamedMedia(
                         remoteFileId = remoteFileId,
                         isAudio = file.category == FileCategory.AUDIO,
                         parts = listOf(MediaPart(remoteFileId, 0, file.sizeBytes)),
-                        encrypted = true
+                        encrypted = true,
+                        encryptionKey = file.encryptionKey
                     )
                 )
                 return@flow
@@ -229,7 +231,7 @@ class PreviewContentResolver(
 
         val success = runCatching {
             if (file.isEncrypted) {
-                val key = wrappedKeyRepository.get(CryptoKeys.CONTENT)
+                val key = wrappedKeyRepository.get(file.encryptionKey)
                     ?: error("Encryption key missing")
                 source.inputStream().buffered().use { input ->
                     target.outputStream().buffered().use { output ->

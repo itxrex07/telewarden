@@ -446,7 +446,7 @@ class TransferExecutor(
             TransferOutcome.Failed(messages.downloadEnded)
 
         return try {
-            partDownloader.download(entity.id, entity.isEncrypted)
+            partDownloader.download(entity.id, entity.isEncrypted, entity.encryptionKey)
                 .failWhenIdle(messages.downloadStalled)
                 .collect { event ->
                     currentCoroutineContext().ensureActive()
@@ -504,7 +504,7 @@ class TransferExecutor(
         if (!source.exists()) return TransferOutcome.Failed(messages.downloadedMissing)
 
         val key = if (entity.isEncrypted && !alreadyPlain) {
-            wrappedKeyRepository.get(CryptoKeys.CONTENT)
+            wrappedKeyRepository.get(entity.encryptionKey)
                 ?: return TransferOutcome.Failed(messages.keyMissing)
         } else {
             null

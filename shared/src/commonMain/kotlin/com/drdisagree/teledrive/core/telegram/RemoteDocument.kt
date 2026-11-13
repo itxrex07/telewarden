@@ -13,7 +13,9 @@ data class RemoteDocument(
     val dateSeconds: Int,
     val miniThumbnail: ByteArray? = null,
     val topicId: Long? = null,
-    val textContent: String? = null
+    val textContent: String? = null,
+    val encryptionKey: String? = null,
+    val displayCaption: String? = null
 ) {
     override fun equals(other: Any?): Boolean =
         other is RemoteDocument && other.chatId == chatId && other.messageId == messageId

@@ -12,4 +12,6 @@ interface WrappedKeyRepository {
     fun exists(name: String): Boolean
 
     fun store(name: String, key: ByteArray)
+
+    fun remove(name: String)
 }

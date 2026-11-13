@@ -48,6 +48,7 @@ data class FileEntity(
     val isFavorite: Boolean = false,
     val isAvailableOffline: Boolean = false,
     val isEncrypted: Boolean = false,
+    val encryptionKey: String = "content",
     val width: Int? = null,
     val height: Int? = null,
     val durationMs: Long? = null,

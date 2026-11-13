@@ -69,6 +69,13 @@ class FileWrappedKeyRepository(
         cache[name] = key
     }
 
+    @Synchronized
+    override fun remove(name: String) {
+        cache.remove(name)
+        recreated.remove(name)
+        keyFile(name).delete()
+    }
+
     private fun keyFile(name: String): File =
         File(File(storagePaths.filesDir, "keys"), "$name.bin")
 
