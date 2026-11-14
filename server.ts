@@ -1,8 +1,8 @@
 /**
- * TeleDrive Encrypted Cloud Session & Settings Server (server.ts)
+ * TeleWarden Encrypted Cloud Session & Settings Server (server.ts)
  *
  * A strongly encrypted MongoDB-backed backend server for storing and restoring
- * TeleDrive user sessions and application settings.
+ * TeleWarden user sessions and application settings.
  *
  * Security Architecture:
  * 1. Client-Side E2EE: The app encrypts the session & settings payload with AES-256-GCM
@@ -19,7 +19,7 @@
  *
  * Environment Variables:
  *   MONGODB_URI        - MongoDB connection string (e.g. mongodb+srv://... or mongodb://127.0.0.1:27017)
- *   MONGODB_DB_NAME    - Database name (default: "teledrive_cloud")
+ *   MONGODB_DB_NAME    - Database name (default: "TeleWarden_cloud")
  *   SERVER_MASTER_KEY  - 32+ char secret master key for HKDF & HMAC derivation
  *   PORT               - HTTP listen port (default: 8787)
  *
@@ -36,7 +36,7 @@ import { MongoClient, Collection, Db } from "mongodb";
 
 const PORT = Number(process.env.PORT || 3000);
 const MONGODB_URI = (process.env.MONGODB_URI || process.env.MONGO_URI || "mongodb://127.0.0.1:27017").trim();
-const MONGODB_DB_NAME = (process.env.MONGODB_DB_NAME || "teledrive_cloud").trim();
+const MONGODB_DB_NAME = (process.env.MONGODB_DB_NAME || "TeleWarden_cloud").trim();
 const DATA_DIR = path.resolve(process.env.CLOUD_DATA_DIR || "./.cloud-store");
 const USERS_DIR = path.join(DATA_DIR, "users");
 const MASTER_KEY_FILE = path.join(DATA_DIR, ".master.key");
@@ -107,7 +107,7 @@ function deriveUserStorageKey(userId: string): Buffer {
             "sha256",
             MASTER_KEY,
             Buffer.from(userId, "hex"),
-            Buffer.from("teledrive-at-rest-aes256gcm-v1", "utf8"),
+            Buffer.from("TeleWarden-at-rest-aes256gcm-v1", "utf8"),
             32
         )
     );
@@ -119,7 +119,7 @@ function deriveTokenSigningKey(): Buffer {
             "sha256",
             MASTER_KEY,
             Buffer.alloc(32, 0),
-            Buffer.from("teledrive-session-token-hmac-v1", "utf8"),
+            Buffer.from("TeleWarden-session-token-hmac-v1", "utf8"),
             32
         )
     );
@@ -193,17 +193,17 @@ async function initMongo(): Promise<void> {
         });
         await client.connect();
         const db = client.db(MONGODB_DB_NAME);
-        const col = db.collection<MongoUserDocument>("teledrive_users");
+        const col = db.collection<MongoUserDocument>("TeleWarden_users");
         await col.createIndex({ userId: 1 }, { unique: true });
 
         mongoClient = client;
         mongoDb = db;
         usersCollection = col;
-        console.log(`[TeleDrive Cloud Server] Connected to MongoDB (${MONGODB_DB_NAME}.teledrive_users)`);
+        console.log(`[TeleWarden Cloud Server] Connected to MongoDB (${MONGODB_DB_NAME}.TeleWarden_users)`);
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.warn(
-            `[TeleDrive Cloud Server] MongoDB unavailable (${msg}). Using local AES-256-GCM disk store fallback at ${USERS_DIR}`
+            `[TeleWarden Cloud Server] MongoDB unavailable (${msg}). Using local AES-256-GCM disk store fallback at ${USERS_DIR}`
         );
     }
 }
@@ -370,7 +370,7 @@ const server = http.createServer(async (req, res) => {
         if (method === "GET" && (pathname === "/api/cloud/health" || pathname === "/health")) {
             sendJson(res, 200, {
                 status: "ok",
-                service: "teledrive-cloud-session-store",
+                service: "TeleWarden-cloud-session-store",
                 storage: usersCollection ? "mongodb" : "encrypted-disk-fallback",
                 database: usersCollection ? MONGODB_DB_NAME : null,
                 encryption: "AES-256-GCM + Scrypt + HKDF-SHA256"
@@ -532,7 +532,7 @@ async function startServer(): Promise<void> {
     await initMongo();
     server.listen(PORT, () => {
         console.log(
-            `[TeleDrive Cloud Server] Listening on port ${PORT} (MongoDB + AES-256-GCM + Scrypt)`
+            `[TeleWarden Cloud Server] Listening on port ${PORT} (MongoDB + AES-256-GCM + Scrypt)`
         );
     });
 }
