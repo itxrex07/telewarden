@@ -20,7 +20,7 @@
  * Environment Variables:
  *   MONGODB_URI        - MongoDB connection string (e.g. mongodb+srv://... or mongodb://127.0.0.1:27017)
  *   MONGODB_DB_NAME    - Database name (default: "TeleWarden_cloud")
- *   SERVER_MASTER_KEY  - 32+ char secret master key for HKDF & HMAC derivation
+ *   SERVER_MASTER_KEY  - Any non-empty secret; it is SHA-256 normalized to 32 bytes
  *   PORT               - HTTP listen port (default: 8787)
  *
  * Run with:
@@ -53,7 +53,7 @@ fs.mkdirSync(USERS_DIR, { recursive: true, mode: 0o700 });
  */
 function loadOrCreateMasterKey(): Buffer {
     const envKey = process.env.SERVER_MASTER_KEY?.trim();
-    if (envKey && envKey.length >= 32) {
+    if (envKey) {
         return crypto.createHash("sha256").update(envKey, "utf8").digest();
     }
     if (fs.existsSync(MASTER_KEY_FILE)) {
