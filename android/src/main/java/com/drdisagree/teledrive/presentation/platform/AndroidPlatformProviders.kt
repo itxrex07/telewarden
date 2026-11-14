@@ -9,6 +9,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -26,6 +27,7 @@ import com.drdisagree.teledrive.core.permissions.manifestPermission
 import com.drdisagree.teledrive.core.permissions.openAllFilesAccess
 import com.drdisagree.teledrive.core.permissions.openAppSettings
 import com.drdisagree.teledrive.core.permissions.openBatteryOptimization
+import com.drdisagree.teledrive.core.root.RootShell
 import com.drdisagree.teledrive.domain.model.AppTheme
 import com.drdisagree.teledrive.domain.model.UserPreferences
 import com.drdisagree.teledrive.domain.repository.SettingsRepository
@@ -33,6 +35,7 @@ import com.drdisagree.teledrive.presentation.applock.requireDeviceOwner
 import com.drdisagree.teledrive.presentation.common.openLink
 import com.drdisagree.teledrive.presentation.common.shareLocalFiles
 import com.drdisagree.teledrive.presentation.components.FileSystemFolderPickerDialog
+import com.drdisagree.teledrive.presentation.components.FolderPickerRoot
 import com.drdisagree.teledrive.presentation.components.FolderListResult
 import com.drdisagree.teledrive.presentation.components.LocalFolderItem
 import com.drdisagree.teledrive.presentation.theme.TeleDriveTheme
@@ -59,6 +62,10 @@ fun ProvidePlatformActions(content: @Composable () -> Unit) {
     val telegramLinkOpener = remember(context) { AndroidTelegramLinkOpener(context) }
 
     var activeFolderPickerCallback by remember { mutableStateOf<((PickResult) -> Unit)?>(null) }
+    var rootAvailable by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        rootAvailable = withContext(Dispatchers.IO) { RootShell.isAvailable() }
+    }
 
     val folderCallback = remember { CallbackHolder<PickResult>() }
     val folderLauncher = rememberLauncherForActivityResult(
@@ -203,14 +210,18 @@ fun ProvidePlatformActions(content: @Composable () -> Unit) {
             TeleDriveTheme(darkTheme = darkTheme, dynamicColor = prefs.dynamicColor) {
                 FileSystemFolderPickerDialog(
                     rootPath = externalStorageRoot,
+                    alternateRoots = if (rootAvailable) listOf(FolderPickerRoot("Root", "/")) else emptyList(),
                     listSubfolders = { path ->
                         withContext(Dispatchers.IO) {
-                            val dir = File(path)
-                            val javaFiles = runCatching { dir.listFiles() }.getOrNull()
+                            val javaFiles = if (rootAvailable) {
+                                RootShell.listDirectories(path)
+                            } else {
+                                runCatching { File(path).listFiles()?.filter { it.isDirectory } }.getOrNull()
+                            }
                             if (javaFiles == null) {
                                 FolderListResult.Unreadable
                             } else {
-                                val items = javaFiles.filter { it.isDirectory }
+                                val items = javaFiles
                                     .sortedBy { it.name.lowercase() }
                                     .map { LocalFolderItem(it.name, it.absolutePath) }
                                 FolderListResult.Success(items)
@@ -219,7 +230,8 @@ fun ProvidePlatformActions(content: @Composable () -> Unit) {
                     },
                     createSubfolder = { parentPath, name ->
                         withContext(Dispatchers.IO) {
-                            runCatching { File(parentPath, name).mkdir() }.getOrDefault(false)
+                            if (rootAvailable) RootShell.createDirectory(parentPath, name)
+                            else runCatching { File(parentPath, name).mkdir() }.getOrDefault(false)
                         }
                     },
                     onUseSaf = {

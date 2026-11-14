@@ -76,6 +76,7 @@ import org.jetbrains.compose.resources.stringResource
 @Composable
 fun FileSystemFolderPickerDialog(
     rootPath: String,
+    alternateRoots: List<FolderPickerRoot> = emptyList(),
     listSubfolders: suspend (String) -> FolderListResult,
     createSubfolder: (suspend (parentPath: String, name: String) -> Boolean)? = null,
     onUseSaf: (() -> Unit)? = null,
@@ -112,7 +113,7 @@ fun FileSystemFolderPickerDialog(
 
     val quickChips = remember(rootPath) {
         val base = rootPath.trimEnd('/')
-        val candidates = listOf(
+        val candidates = alternateRoots.map { QuickFolderChip(label = it.label, path = it.path) } + listOf(
             QuickFolderChip(label = "", path = base, isHome = true),
             QuickFolderChip(label = "Download", path = "$base/Download"),
             QuickFolderChip(label = "Documents", path = "$base/Documents"),
