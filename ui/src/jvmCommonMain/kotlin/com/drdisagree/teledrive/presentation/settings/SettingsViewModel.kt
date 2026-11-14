@@ -155,7 +155,7 @@ class SettingsViewModel(
             backupRepository.syncActiveSessionWithSelection()
             rescheduleWork()
             if (current.isCloudConnected && current.cloudAutoSync) {
-                runCatching { cloudSyncRepository.pushToCloud() }
+                runCatching { cloudSyncRepository.pushSessionMigration() }
             }
         }
     }
@@ -416,7 +416,7 @@ class SettingsViewModel(
                 is AppResult.Success -> {
                     val prefs = settingsRepository.preferences.first()
                     if (prefs.isCloudConnected && prefs.cloudAutoSync) {
-                        cloudSyncRepository.pushToCloud()
+                        cloudSyncRepository.pushSessionMigration()
                     }
                     _messages.tryEmit(
                         if (result.value.lockedFiles > 0) {
@@ -483,10 +483,10 @@ class SettingsViewModel(
 
     fun saveCloudSessionNow() {
         viewModelScope.launch {
-            when (val result = cloudSyncRepository.pushToCloud()) {
+            when (val result = cloudSyncRepository.pushSessionMigration()) {
                 is AppResult.Success -> {
                     _messages.tryEmit(
-                        UiText.Plain("Encrypted session & settings saved to cloud")
+                        UiText.Plain("Encrypted Telegram session and key files saved to cloud")
                     )
                 }
 
@@ -497,10 +497,10 @@ class SettingsViewModel(
 
     fun restoreCloudSessionNow() {
         viewModelScope.launch {
-            when (val result = cloudSyncRepository.pullFromCloud()) {
+            when (val result = cloudSyncRepository.pullSessionMigration()) {
                 is AppResult.Success -> {
                     _messages.tryEmit(
-                        UiText.Plain("Restored session & settings from cloud")
+                        UiText.Plain("Restored Telegram session and key files from cloud")
                     )
                 }
 
@@ -520,7 +520,7 @@ class SettingsViewModel(
         viewModelScope.launch {
             val prefs = settingsRepository.preferences.first()
             if (prefs.isCloudConnected) {
-                runCatching { cloudSyncRepository.pushToCloud() }
+                runCatching { cloudSyncRepository.pushSessionMigration() }
             }
             when (val result = telegramAuthRepository.logout()) {
                 is AppResult.Success -> {

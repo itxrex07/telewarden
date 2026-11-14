@@ -32,7 +32,7 @@ import * as http from "node:http";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { MongoClient, Collection, Db } from "mongodb";
+import { MongoClient, Collection, Db, GridFSBucket, ObjectId } from "mongodb";
 
 const PORT = Number(process.env.PORT || 3000);
 const MONGODB_URI = (process.env.MONGODB_URI || process.env.MONGO_URI || "mongodb://127.0.0.1:27017").trim();
@@ -41,7 +41,10 @@ const DATA_DIR = path.resolve(process.env.CLOUD_DATA_DIR || "./.cloud-store");
 const USERS_DIR = path.join(DATA_DIR, "users");
 const MASTER_KEY_FILE = path.join(DATA_DIR, ".master.key");
 const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
-const MAX_BODY_BYTES = 32 * 1024 * 1024; // 32 MB max payload for session + settings
+const MAX_BODY_BYTES = 32 * 1024 * 1024; // small settings envelope only
+const MAX_MIGRATION_CHUNK_BYTES = 16 * 1024 * 1024;
+const MAX_MIGRATION_BYTES = 20 * 1024 * 1024 * 1024;
+const MIGRATION_TTL_MS = 24 * 60 * 60 * 1000;
 
 fs.mkdirSync(USERS_DIR, { recursive: true, mode: 0o700 });
 
@@ -88,6 +91,37 @@ interface MongoUserDocument {
     sealed: SealedEnvelopePayload;
     updatedAt: Date;
     createdAt: Date;
+}
+
+interface SessionMigrationDocument {
+    _id: string;
+    userId: string;
+    formatVersion: number;
+    totalBytes: number;
+    chunkSize: number;
+    chunkCount: number;
+    sha256: string;
+    saltBase64: string;
+    chunkIds: Array<ObjectId | null>;
+    status: "uploading" | "complete";
+    createdAt: Date;
+    updatedAt: Date;
+    expiresAt: Date;
+}
+
+interface LocalSessionMigration {
+    id: string;
+    userId: string;
+    formatVersion: number;
+    totalBytes: number;
+    chunkSize: number;
+    chunkCount: number;
+    sha256: string;
+    saltBase64: string;
+    status: "uploading" | "complete";
+    createdAt: number;
+    updatedAt: number;
+    expiresAt: number;
 }
 
 function normalizeUsername(username: string): string {
@@ -183,6 +217,9 @@ function unsealUserRecord(userId: string, sealed: SealedEnvelopePayload): Stored
 let mongoClient: MongoClient | null = null;
 let mongoDb: Db | null = null;
 let usersCollection: Collection<MongoUserDocument> | null = null;
+let migrationsCollection: Collection<SessionMigrationDocument> | null = null;
+let gridFsBucket: GridFSBucket | null = null;
+const localMigrations = new Map<string, LocalSessionMigration>();
 
 async function initMongo(): Promise<void> {
     try {
@@ -195,10 +232,15 @@ async function initMongo(): Promise<void> {
         const db = client.db(MONGODB_DB_NAME);
         const col = db.collection<MongoUserDocument>("TeleWarden_users");
         await col.createIndex({ userId: 1 }, { unique: true });
+        const migrations = db.collection<SessionMigrationDocument>("TeleWarden_session_migrations");
+        await migrations.createIndex({ userId: 1, createdAt: -1 });
+        await migrations.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
         mongoClient = client;
         mongoDb = db;
         usersCollection = col;
+        migrationsCollection = migrations;
+        gridFsBucket = new GridFSBucket(db, { bucketName: "TeleWarden_session_migrations" });
         console.log(`[TeleWarden Cloud Server] Connected to MongoDB (${MONGODB_DB_NAME}.TeleWarden_users)`);
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -344,6 +386,77 @@ function readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown
         });
         req.on("error", reject);
     });
+}
+
+function readBinaryBody(req: http.IncomingMessage, maxBytes: number): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+        const chunks: Buffer[] = [];
+        let total = 0;
+        req.on("data", (chunk: Buffer) => {
+            total += chunk.length;
+            if (total > maxBytes) {
+                reject(new Error("Chunk too large"));
+                req.destroy();
+                return;
+            }
+            chunks.push(chunk);
+        });
+        req.on("end", () => resolve(Buffer.concat(chunks)));
+        req.on("error", reject);
+    });
+}
+
+async function cleanupExpiredMigrations(): Promise<void> {
+    const now = new Date();
+    if (migrationsCollection && gridFsBucket) {
+        const expired = await migrationsCollection.find({ expiresAt: { $lte: now } }).toArray();
+        for (const migration of expired) {
+            for (const chunkId of migration.chunkIds) {
+                if (chunkId) await gridFsBucket.delete(chunkId).catch(() => undefined);
+            }
+            await migrationsCollection.deleteOne({ _id: migration._id });
+        }
+    }
+    for (const [id, migration] of localMigrations) {
+        if (migration.expiresAt <= Date.now()) {
+            localMigrations.delete(id);
+            fs.rmSync(path.join(DATA_DIR, "session-migrations", id), { recursive: true, force: true });
+        }
+    }
+}
+
+function migrationId(): string {
+    return crypto.randomUUID();
+}
+
+function isSafeMigrationId(value: string): boolean {
+    return /^[a-f0-9-]{16,80}$/i.test(value);
+}
+
+function migrationView(record: SessionMigrationDocument | LocalSessionMigration): Record<string, unknown> {
+    const mongo = "_id" in record;
+    const uploadedChunks = mongo
+        ? record.chunkIds.reduce<number[]>((out, id, index) => {
+            if (id) out.push(index);
+            return out;
+        }, [])
+        : undefined;
+    return {
+        id: mongo ? record._id : record.id,
+        status: record.status,
+        formatVersion: record.formatVersion,
+        totalBytes: record.totalBytes,
+        chunkSize: record.chunkSize,
+        chunkCount: record.chunkCount,
+        sha256: record.sha256,
+        saltBase64: record.saltBase64,
+        uploadedChunks,
+        expiresAt: record.expiresAt
+    };
+}
+
+function migrationFilePath(id: string, index: number): string {
+    return path.join(DATA_DIR, "session-migrations", id, `${index}.bin`);
 }
 
 function sendJson(res: http.ServerResponse, status: number, data: Record<string, unknown>): void {
@@ -508,7 +621,202 @@ const server = http.createServer(async (req, res) => {
             }
         }
 
-        // 4. Delete cloud account
+        // 4. Large session-only migration. Payload bytes are already client-encrypted.
+        if (pathname === "/api/cloud/session-migrations" || pathname.startsWith("/api/cloud/session-migrations/")) {
+            const token = extractBearerToken(req);
+            const verified = token ? verifySessionToken(token) : null;
+            if (!verified) {
+                sendJson(res, 401, { error: "Unauthorized or expired session token" });
+                return;
+            }
+
+            const suffix = pathname.slice("/api/cloud/session-migrations".length).replace(/^\//, "");
+            if (method === "POST" && suffix === "") {
+                const body = await readJsonBody(req);
+                const totalBytes = Number(body.totalBytes);
+                const chunkSize = Number(body.chunkSize);
+                const chunkCount = Number(body.chunkCount);
+                const formatVersion = Number(body.formatVersion || 1);
+                const sha256 = typeof body.sha256 === "string" ? body.sha256.toLowerCase() : "";
+                const saltBase64 = typeof body.saltBase64 === "string" ? body.saltBase64 : "";
+                if (!Number.isSafeInteger(totalBytes) || totalBytes <= 0 || totalBytes > MAX_MIGRATION_BYTES ||
+                    !Number.isSafeInteger(chunkSize) || chunkSize <= 0 || chunkSize > MAX_MIGRATION_CHUNK_BYTES ||
+                    !Number.isSafeInteger(chunkCount) || chunkCount <= 0 || chunkCount > 200000 ||
+                    !/^[a-f0-9]{64}$/.test(sha256) || !/^[A-Za-z0-9+/]{16,64}={0,2}$/.test(saltBase64) || formatVersion !== 1 ||
+                    chunkCount !== Math.ceil(totalBytes / chunkSize)) {
+                    sendJson(res, 400, { error: "Invalid session migration manifest" });
+                    return;
+                }
+                const id = migrationId();
+                const now = new Date();
+                if (migrationsCollection) {
+                    const record: SessionMigrationDocument = {
+                        _id: id,
+                        userId: verified.userId,
+                        formatVersion,
+                        totalBytes,
+                        chunkSize,
+                        chunkCount,
+                        sha256,
+                        saltBase64,
+                        chunkIds: Array.from({ length: chunkCount }, () => null),
+                        status: "uploading",
+                        createdAt: now,
+                        updatedAt: now,
+                        expiresAt: new Date(now.getTime() + MIGRATION_TTL_MS)
+                    };
+                    await migrationsCollection.insertOne(record);
+                    sendJson(res, 201, migrationView(record));
+                } else {
+                    const record: LocalSessionMigration = {
+                        id, userId: verified.userId, formatVersion, totalBytes, chunkSize, chunkCount,
+                        sha256, saltBase64, status: "uploading", createdAt: Date.now(), updatedAt: Date.now(),
+                        expiresAt: Date.now() + MIGRATION_TTL_MS
+                    };
+                    localMigrations.set(id, record);
+                    fs.mkdirSync(path.join(DATA_DIR, "session-migrations", id), { recursive: true, mode: 0o700 });
+                    sendJson(res, 201, migrationView(record));
+                }
+                return;
+            }
+
+            if (method === "GET" && suffix === "latest") {
+                const latest = migrationsCollection
+                    ? await migrationsCollection.findOne(
+                        { userId: verified.userId, status: "complete", expiresAt: { $gt: new Date() } },
+                        { sort: { createdAt: -1 } }
+                    )
+                    : Array.from(localMigrations.values())
+                        .filter(item => item.userId === verified.userId && item.status === "complete" && item.expiresAt > Date.now())
+                        .sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
+                if (!latest) {
+                    sendJson(res, 404, { error: "No completed session migration found" });
+                } else {
+                    sendJson(res, 200, migrationView(latest));
+                }
+                return;
+            }
+
+            const parts = suffix.split("/");
+            const id = parts[0];
+            if (!isSafeMigrationId(id)) {
+                sendJson(res, 400, { error: "Invalid migration ID" });
+                return;
+            }
+            const migration = migrationsCollection
+                ? await migrationsCollection.findOne({ _id: id, userId: verified.userId })
+                : localMigrations.get(id) ?? null;
+            if (!migration) {
+                sendJson(res, 404, { error: "Migration not found" });
+                return;
+            }
+            const index = parts.length > 1 && parts[1] !== "" ? Number(parts[1]) : -1;
+
+            if (method === "PUT" && parts.length === 2 && Number.isInteger(index)) {
+                if (index < 0 || index >= migration.chunkCount) {
+                    sendJson(res, 400, { error: "Invalid chunk index" });
+                    return;
+                }
+                const bytes = await readBinaryBody(req, MAX_MIGRATION_CHUNK_BYTES);
+                const expectedSize = index === migration.chunkCount - 1
+                    ? migration.totalBytes - migration.chunkSize * (migration.chunkCount - 1)
+                    : migration.chunkSize;
+                if (bytes.length !== expectedSize) {
+                    sendJson(res, 400, { error: "Invalid chunk size" });
+                    return;
+                }
+                if (migrationsCollection && gridFsBucket) {
+                    const mongoMigration = migration as SessionMigrationDocument;
+                    const oldId = mongoMigration.chunkIds[index];
+                    if (oldId) await gridFsBucket.delete(oldId).catch(() => undefined);
+                    const upload = gridFsBucket.openUploadStream(`${id}:${index}`, {
+                        metadata: { migrationId: id, chunkIndex: index, userId: verified.userId }
+                    });
+                    await new Promise<void>((resolve, reject) => {
+                        upload.once("error", reject);
+                        upload.once("finish", () => resolve());
+                        upload.end(bytes);
+                    });
+                    await migrationsCollection.updateOne(
+                        { _id: id, userId: verified.userId },
+                        { $set: { [`chunkIds.${index}`]: upload.id, updatedAt: new Date() } }
+                    );
+                } else {
+                    fs.writeFileSync(migrationFilePath(id, index), bytes, { mode: 0o600 });
+                    migration.updatedAt = Date.now();
+                }
+                sendJson(res, 200, { status: "ok", migrationId: id, chunkIndex: index });
+                return;
+            }
+
+            if (method === "POST" && parts.length === 2 && parts[1] === "complete") {
+                const complete = migrationsCollection
+                    ? await migrationsCollection.findOne({ _id: id, userId: verified.userId })
+                    : localMigrations.get(id) ?? null;
+                const uploaded = migrationsCollection
+                    ? (complete as SessionMigrationDocument | null)?.chunkIds.every(Boolean)
+                    : Array.from({ length: migration.chunkCount }, (_, i) => fs.existsSync(migrationFilePath(id, i))).every(Boolean);
+                if (!complete || !uploaded) {
+                    sendJson(res, 409, { error: "Migration is missing chunks" });
+                    return;
+                }
+                if (migrationsCollection) {
+                    await migrationsCollection.updateOne(
+                        { _id: id, userId: verified.userId },
+                        { $set: { status: "complete", updatedAt: new Date() } }
+                    );
+                } else {
+                    migration.status = "complete";
+                    migration.updatedAt = Date.now();
+                }
+                sendJson(res, 200, { status: "complete", migrationId: id });
+                return;
+            }
+
+            if (method === "GET" && parts.length === 1) {
+                sendJson(res, 200, migrationView(migration));
+                return;
+            }
+
+            if (method === "GET" && parts.length === 2 && Number.isInteger(index)) {
+                if (index < 0 || index >= migration.chunkCount) {
+                    sendJson(res, 400, { error: "Invalid chunk index" });
+                    return;
+                }
+                res.writeHead(200, {
+                    "Content-Type": "application/octet-stream",
+                    "Content-Length": String(index === migration.chunkCount - 1
+                        ? migration.totalBytes - migration.chunkSize * (migration.chunkCount - 1)
+                        : migration.chunkSize),
+                    "Cache-Control": "no-store",
+                    "X-Content-Type-Options": "nosniff"
+                });
+                if (migrationsCollection && gridFsBucket) {
+                    const chunkId = (migration as SessionMigrationDocument).chunkIds[index];
+                    if (!chunkId) { res.end(); return; }
+                    gridFsBucket.openDownloadStream(chunkId).pipe(res);
+                } else {
+                    fs.createReadStream(migrationFilePath(id, index)).pipe(res);
+                }
+                return;
+            }
+
+            if (method === "DELETE" && parts.length === 1) {
+                if (migrationsCollection && gridFsBucket) {
+                    for (const chunkId of (migration as SessionMigrationDocument).chunkIds) {
+                        if (chunkId) await gridFsBucket.delete(chunkId).catch(() => undefined);
+                    }
+                    await migrationsCollection.deleteOne({ _id: id, userId: verified.userId });
+                } else {
+                    localMigrations.delete(id);
+                    fs.rmSync(path.join(DATA_DIR, "session-migrations", id), { recursive: true, force: true });
+                }
+                sendJson(res, 200, { status: "ok", deleted: true });
+                return;
+            }
+        }
+
+        // 5. Delete cloud account
         if (method === "DELETE" && pathname === "/api/cloud/account") {
             const token = extractBearerToken(req);
             const verified = token ? verifySessionToken(token) : null;
@@ -530,6 +838,7 @@ const server = http.createServer(async (req, res) => {
 
 async function startServer(): Promise<void> {
     await initMongo();
+    setInterval(() => void cleanupExpiredMigrations().catch(() => undefined), 60 * 60 * 1000);
     server.listen(PORT, () => {
         console.log(
             `[TeleWarden Cloud Server] Listening on port ${PORT} (MongoDB + AES-256-GCM + Scrypt)`

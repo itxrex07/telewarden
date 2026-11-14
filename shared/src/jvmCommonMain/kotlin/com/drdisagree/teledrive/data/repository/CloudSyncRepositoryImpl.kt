@@ -37,11 +37,14 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.security.DigestOutputStream
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -374,6 +377,130 @@ class CloudSyncRepositoryImpl(
         )
     }
 
+    override suspend fun pushSessionMigration(): AppResult<CloudSyncSummary> = withContext(Dispatchers.IO) {
+        val prefs = settingsRepository.preferences.first()
+        val password = settingsRepository.getCloudSecret()
+            ?: return@withContext AppResult.Failure(AppError.AuthenticationRequired)
+        val baseUrl = normalizeServerUrl(prefs.cloudServerUrl)
+        if (baseUrl.isBlank()) return@withContext AppResult.Failure(
+            AppError.AuthenticationFailed("A custom cloud server is required for large session migration")
+        )
+        val credentials = settingsRepository.getTelegramCredentials()
+        val zip = File(storagePaths.cacheDir, "tw-session-${System.currentTimeMillis()}.zip")
+        val encrypted = File(storagePaths.cacheDir, "tw-session-${System.currentTimeMillis()}.bin")
+        var token = prefs.cloudSessionToken
+        try {
+            if (token.isBlank()) token = when (val login = loginOnServer(baseUrl, prefs.cloudUsername, password)) {
+                is AppResult.Success -> login.value.first
+                is AppResult.Failure -> return@withContext login
+            }
+            telegramClient.close()
+            createSessionArchive(zip)
+            val salt = passphraseKdf.newSalt()
+            val key = passphraseKdf.deriveKey(
+                credentialMaterial(prefs.cloudUsername, password), salt, CloudEnvelope.DEFAULT_ITERATIONS
+            )
+            val digest = MessageDigest.getInstance("SHA-256")
+            DigestOutputStream(encrypted.outputStream().buffered(), digest).use { output ->
+                streamCrypto.encryptStream(key, zip.inputStream().buffered(), output)
+            }
+            val totalBytes = encrypted.length()
+            val chunkSize = SESSION_CHUNK_SIZE
+            val chunkCount = ((totalBytes + chunkSize - 1) / chunkSize).toInt()
+            val manifest = cloudJson(
+                baseUrl, token, "POST", "/api/cloud/session-migrations",
+                buildJsonObject {
+                    put("formatVersion", 1)
+                    put("totalBytes", totalBytes)
+                    put("chunkSize", chunkSize)
+                    put("chunkCount", chunkCount)
+                    put("sha256", digest.digest().joinToString("") { "%02x".format(it) })
+                    put("saltBase64", Base64.getEncoder().encodeToString(salt))
+                }
+            ).getOrElse { return@withContext it }
+            val migrationId = manifest["id"]?.jsonPrimitive?.contentOrNull
+                ?: return@withContext AppResult.Failure(AppError.Unknown("Cloud did not return a migration ID"))
+            encrypted.inputStream().buffered().use { input ->
+                val buffer = ByteArray(chunkSize)
+                for (index in 0 until chunkCount) {
+                    val expected = if (index == chunkCount - 1) totalBytes - index.toLong() * chunkSize else chunkSize.toLong()
+                    var read = 0
+                    while (read < expected) {
+                        val count = input.read(buffer, read, (expected - read).toInt())
+                        if (count <= 0) error("Encrypted migration ended early")
+                        read += count
+                    }
+                    uploadMigrationChunk(baseUrl, token, migrationId, index, buffer.copyOf(read))
+                }
+            }
+            cloudJson(baseUrl, token, "POST", "/api/cloud/session-migrations/$migrationId/complete", null)
+                .getOrElse { return@withContext it }
+            AppResult.Success(CloudSyncSummary(prefs.cloudUsername, 0, System.currentTimeMillis(), true))
+        } catch (e: Exception) {
+            AppResult.Failure(AppError.Unknown(e.message ?: "Session migration upload failed"))
+        } finally {
+            zip.delete(); encrypted.delete()
+            if (credentials != null) runCatching { telegramClient.start(credentials) }
+        }
+    }
+
+    override suspend fun pullSessionMigration(): AppResult<CloudSyncSummary> = withContext(Dispatchers.IO) {
+        val prefs = settingsRepository.preferences.first()
+        val password = settingsRepository.getCloudSecret()
+            ?: return@withContext AppResult.Failure(AppError.AuthenticationRequired)
+        val baseUrl = normalizeServerUrl(prefs.cloudServerUrl)
+        if (baseUrl.isBlank()) return@withContext AppResult.Failure(
+            AppError.AuthenticationFailed("A custom cloud server is required for large session migration")
+        )
+        var token = prefs.cloudSessionToken
+        try {
+            if (token.isBlank()) token = when (val login = loginOnServer(baseUrl, prefs.cloudUsername, password)) {
+                is AppResult.Success -> login.value.first
+                is AppResult.Failure -> return@withContext login
+            }
+            val manifest = cloudJson(baseUrl, token, "GET", "/api/cloud/session-migrations/latest", null)
+                .getOrElse { return@withContext it }
+            val id = manifest["id"]?.jsonPrimitive?.contentOrNull
+                ?: return@withContext AppResult.Failure(AppError.Unknown("No saved session migration found"))
+            val totalBytes = manifest["totalBytes"]?.jsonPrimitive?.longOrNull
+                ?: return@withContext AppResult.Failure(AppError.Unknown("Invalid migration size"))
+            val chunkSize = manifest["chunkSize"]?.jsonPrimitive?.intOrNull
+                ?: return@withContext AppResult.Failure(AppError.Unknown("Invalid migration chunk size"))
+            val chunkCount = manifest["chunkCount"]?.jsonPrimitive?.intOrNull
+                ?: return@withContext AppResult.Failure(AppError.Unknown("Invalid migration chunk count"))
+            val expectedHash = manifest["sha256"]?.jsonPrimitive?.contentOrNull
+                ?: return@withContext AppResult.Failure(AppError.Unknown("Missing migration hash"))
+            val salt = Base64.getDecoder().decode(manifest["saltBase64"]?.jsonPrimitive?.content ?: "")
+            val encrypted = File(storagePaths.cacheDir, "tw-session-download-${System.currentTimeMillis()}.bin")
+            val zip = File(storagePaths.cacheDir, "tw-session-download-${System.currentTimeMillis()}.zip")
+            val credentials = settingsRepository.getTelegramCredentials()
+            var tdlibClosed = false
+            try {
+                encrypted.outputStream().buffered().use { output ->
+                    for (index in 0 until chunkCount) {
+                        output.write(downloadMigrationChunk(baseUrl, token, id, index, chunkSize, index == chunkCount - 1, totalBytes))
+                    }
+                }
+                require(sha256Of(encrypted) == expectedHash) { "Session migration hash mismatch" }
+                val key = passphraseKdf.deriveKey(
+                    credentialMaterial(prefs.cloudUsername, password), salt, CloudEnvelope.DEFAULT_ITERATIONS
+                )
+                streamCrypto.decryptStream(key, encrypted.inputStream().buffered(), zip.outputStream().buffered())
+                telegramClient.close()
+                tdlibClosed = true
+                restoreSessionArchive(zip)
+                if (credentials != null) telegramClient.start(credentials)
+                tdlibClosed = false
+                AppResult.Success(CloudSyncSummary(prefs.cloudUsername, 0, System.currentTimeMillis(), true))
+            } finally {
+                if (tdlibClosed && credentials != null) runCatching { telegramClient.start(credentials) }
+                encrypted.delete(); zip.delete()
+            }
+        } catch (e: Exception) {
+            AppResult.Failure(AppError.Unknown(e.message ?: "Session migration restore failed"))
+        }
+    }
+
     override suspend fun signOut() {
         mutex.withLock {
             settingsRepository.clearCloudSecret()
@@ -544,7 +671,6 @@ class CloudSyncRepositoryImpl(
                 lastOpenedAt = entity.lastOpenedAt
             )
         }
-        val (dbZip, dbKey) = packTdlibDatabase()
         val settingsSnapshot = CloudSettingsSnapshot(
             autoBackupEnabled = prefs.autoBackupEnabled,
             instantBackupEnabled = prefs.instantBackupEnabled,
@@ -592,8 +718,9 @@ class CloudSyncRepositoryImpl(
             updatedAt = System.currentTimeMillis(),
             telegramApiId = tgCredentials?.apiId,
             telegramApiHash = tgCredentials?.apiHash,
-            tdlibDatabaseZipBase64 = dbZip,
-            tdlibDatabaseKeyBase64 = dbKey,
+            // Large TDLib session data is transferred only through session-migrations.
+            tdlibDatabaseZipBase64 = null,
+            tdlibDatabaseKeyBase64 = null,
             activeStorageChatId = prefs.storageChatId,
             drives = drives,
             channelSyncModes = prefs.channelSyncModes,
@@ -607,18 +734,10 @@ class CloudSyncRepositoryImpl(
         val apiHash = snapshot.telegramApiHash
         val hasValidCreds = apiId != null && apiId > 0 && !apiHash.isNullOrBlank() && apiHash.length >= 16
 
-        // 1. Restore TDLib session database & database encryption key if present in snapshot
-        val hasRemoteSessionDb = !snapshot.tdlibDatabaseZipBase64.isNullOrBlank()
-        var sessionUnpacked = false
-        if (hasRemoteSessionDb && telegramClient.authState.value != TelegramAuthState.Ready) {
-            runCatching { telegramClient.close() }
-            sessionUnpacked = unpackTdlibDatabase(
-                snapshot.tdlibDatabaseZipBase64,
-                snapshot.tdlibDatabaseKeyBase64
-            )
-        }
+        // Session data is restored only by pullSessionMigration(); this envelope is settings-only.
+        val sessionUnpacked = false
 
-        // 2. Restore Telegram API credentials
+        // Restore Telegram API credentials
         if (hasValidCreds) {
             settingsRepository.setTelegramCredentials(TelegramCredentials(apiId!!, apiHash!!))
         }
@@ -844,6 +963,120 @@ class CloudSyncRepositoryImpl(
         AppResult.Failure(AppError.AuthenticationFailed(e.message ?: "Failed saving cloud userdata"))
     }
 
+    private fun createSessionArchive(target: File) {
+        val selected = listOf(
+            "tdlib/db/db.sqlite",
+            "tdlib/db/db.sqlite-shm",
+            "tdlib/db/db.sqlite-wal",
+            "tdlib/db/td.binlog",
+            "keys/tdlib_db.bin",
+            "keys/content.bin",
+            "keys/logger.bin"
+        )
+        ZipOutputStream(target.outputStream().buffered()).use { zip ->
+            for (relative in selected) {
+                val source = File(storagePaths.filesDir, relative)
+                if (!source.isFile) continue
+                zip.putNextEntry(ZipEntry(relative))
+                source.inputStream().buffered().use { it.copyTo(zip) }
+                zip.closeEntry()
+            }
+        }
+        require(File(storagePaths.filesDir, "tdlib/db/db.sqlite").isFile) { "TDLib database is missing" }
+        require(File(storagePaths.filesDir, "keys/tdlib_db.bin").isFile) { "TDLib database key is missing" }
+    }
+
+    private fun restoreSessionArchive(archive: File) {
+        val allowed = setOf(
+            "tdlib/db/db.sqlite", "tdlib/db/db.sqlite-shm", "tdlib/db/db.sqlite-wal", "tdlib/db/td.binlog",
+            "keys/tdlib_db.bin", "keys/content.bin", "keys/logger.bin"
+        )
+        ZipInputStream(archive.inputStream().buffered()).use { zip ->
+            var entry = zip.nextEntry
+            var restored = 0
+            while (entry != null) {
+                require(!entry.isDirectory && entry.name in allowed) { "Invalid session archive entry" }
+                val target = File(storagePaths.filesDir, entry.name)
+                target.parentFile?.mkdirs()
+                target.outputStream().buffered().use { zip.copyTo(it) }
+                restored++
+                zip.closeEntry()
+                entry = zip.nextEntry
+            }
+            require(restored >= 2) { "Session archive is incomplete" }
+        }
+    }
+
+    private fun sha256Of(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().buffered().use { input ->
+            val buffer = ByteArray(1024 * 1024)
+            while (true) {
+                val count = input.read(buffer)
+                if (count <= 0) break
+                digest.update(buffer, 0, count)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun cloudJson(
+        baseUrl: String,
+        token: String,
+        method: String,
+        path: String,
+        payload: JsonObject?
+    ): AppResult<JsonObject> = runCatching {
+        val conn = (URL(baseUrl + path).openConnection() as HttpURLConnection).apply {
+            requestMethod = method
+            connectTimeout = 20_000
+            readTimeout = 60_000
+            setRequestProperty("Authorization", "Bearer $token")
+            setRequestProperty("Accept", "application/json")
+            if (payload != null) {
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            }
+        }
+        if (payload != null) conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
+        val code = conn.responseCode
+        val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
+            ?.bufferedReader(Charsets.UTF_8)?.readText().orEmpty()
+        val objectBody = runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull()
+        if (code !in 200..299) return AppResult.Failure(
+            AppError.AuthenticationFailed(objectBody?.get("error")?.jsonPrimitive?.contentOrNull ?: "Cloud HTTP $code")
+        )
+        objectBody ?: JsonObject(emptyMap())
+    }.getOrElse { AppResult.Failure(AppError.AuthenticationFailed(it.message ?: "Cloud request failed")) }
+
+    private fun uploadMigrationChunk(baseUrl: String, token: String, id: String, index: Int, bytes: ByteArray) {
+        val conn = (URL("$baseUrl/api/cloud/session-migrations/$id/$index").openConnection() as HttpURLConnection).apply {
+            requestMethod = "PUT"
+            connectTimeout = 20_000
+            readTimeout = 120_000
+            doOutput = true
+            setRequestProperty("Authorization", "Bearer $token")
+            setRequestProperty("Content-Type", "application/octet-stream")
+            setRequestProperty("Content-Length", bytes.size.toString())
+        }
+        conn.outputStream.use { it.write(bytes) }
+        if (conn.responseCode !in 200..299) error("Cloud rejected migration chunk ${conn.responseCode}")
+    }
+
+    private fun downloadMigrationChunk(
+        baseUrl: String, token: String, id: String, index: Int, chunkSize: Int, last: Boolean, totalBytes: Long
+    ): ByteArray {
+        val conn = (URL("$baseUrl/api/cloud/session-migrations/$id/$index").openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 20_000
+            readTimeout = 120_000
+            setRequestProperty("Authorization", "Bearer $token")
+        }
+        if (conn.responseCode !in 200..299) error("Cloud rejected migration download ${conn.responseCode}")
+        val expected = if (last) (totalBytes - index.toLong() * chunkSize).toInt() else chunkSize
+        return conn.inputStream.use { input -> input.readBytes().also { require(it.size == expected) { "Invalid migration chunk length" } } }
+    }
+
     private fun localVaultFile(userHash: String): File {
         val vaultDir = File(storagePaths.cacheDir, "cloud_vaults").apply { mkdirs() }
         return File(vaultDir, vaultFileName(userHash))
@@ -981,6 +1214,7 @@ class CloudSyncRepositoryImpl(
         ".teledrive_session_$userHash.enc"
 
     private companion object {
+        const val SESSION_CHUNK_SIZE = 8 * 1024 * 1024
         const val VAULT_CAPTION_PREFIX = "#teledrive_session_v1:"
         const val VAULT_PAGE_SIZE = 50
         const val MAX_VAULT_PAGES = 4

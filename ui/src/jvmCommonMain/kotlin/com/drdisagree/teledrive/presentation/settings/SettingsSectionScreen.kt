@@ -435,7 +435,7 @@ private fun AccountSection(
                     "Cloud Connection (Sign In / Register)"
                 },
                 subtitle = when {
-                    state.cloudSyncing -> "Encrypting & syncing session and settings userdata…"
+                    state.cloudSyncing -> "Encrypting and transferring Telegram session files…"
                     prefs.isCloudConnected -> buildString {
                         append(
                             if (prefs.cloudServerUrl.isNotBlank()) {
@@ -449,7 +449,7 @@ private fun AccountSection(
                             append(Formatters.dateTime(prefs.cloudLastSyncedAt))
                         }
                     }
-                    else -> "Register or sign in to save and restore your encrypted session & settings userdata"
+                    else -> "Register or sign in to save and restore encrypted Telegram session files"
                 },
                 onClick = { if (!state.cloudSyncing) showCloudLoginDialog = true },
                 trailing = if (state.cloudSyncing) {
@@ -459,22 +459,22 @@ private fun AccountSection(
         }
         add(visible = prefs.isCloudConnected) {
             SettingsClickRow(
-                title = "Save Session & Settings Now",
-                subtitle = "Encrypt and upload your current session and settings userdata to the cloud",
+                title = "Save Telegram Session Now",
+                subtitle = "Upload only TDLib database files and content/logger/TDLib keys",
                 onClick = { if (!state.cloudSyncing) viewModel.saveCloudSessionNow() }
             )
         }
         add(visible = prefs.isCloudConnected) {
             SettingsClickRow(
-                title = "Restore Session & Settings",
-                subtitle = "Download and apply your encrypted session and settings userdata from the cloud",
+                title = "Restore Telegram Session",
+                subtitle = "Download and restore the latest encrypted session migration",
                 onClick = { if (!state.cloudSyncing) viewModel.restoreCloudSessionNow() }
             )
         }
         add(visible = prefs.isCloudConnected) {
             SettingsSwitchRow(
-                title = "Auto-Save Session & Settings",
-                subtitle = "Automatically save encrypted userdata whenever your settings or channels change",
+                title = "Auto-Save Telegram Session",
+                subtitle = "Automatically save the encrypted Telegram session when cloud sync runs",
                 checked = prefs.cloudAutoSync,
                 onChange = { enabled ->
                     viewModel.update { it.copy(cloudAutoSync = enabled) }

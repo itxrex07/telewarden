@@ -48,6 +48,12 @@ interface CloudSyncRepository {
      */
     suspend fun syncNow(): AppResult<CloudSyncSummary>
 
+    /** Uploads only TDLib root database files and content/logger/TDLib key files. */
+    suspend fun pushSessionMigration(): AppResult<CloudSyncSummary>
+
+    /** Downloads and restores the latest session-only migration. */
+    suspend fun pullSessionMigration(): AppResult<CloudSyncSummary>
+
     /**
      * Disconnects the cloud connection on this device without deleting remote userdata.
      */
